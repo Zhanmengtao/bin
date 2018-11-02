@@ -1,0 +1,192 @@
+#! /bin/sh
+
+# FILE:		chlorop
+# VERSION: 	1.1
+# DATE:		November 17, 2000. 
+# AUTHOR:	Olof Emanuelsson, olof@sbc.su.se
+
+SYSTEM=`uname -s`
+STARTDIR=`pwd`
+
+### GENERAL SETTINGS, CUSTOMIZE +++++++++++++++++++++++++++++++++++++++++++++++
+# Substitute your chosen location for ChloroP software:
+CHLOROP=/usr/cbs/packages/chlorop/currdist/chlorop-1.1
+
+# Substitute paste:
+PASTE=paste
+
+# Substitute nawk, gawk or equivalent:
+#AWK=/usr/freeware/bin/gawk
+AWK=nawk
+if [ "$SYSTEM" = HP-UX ]
+	then AWK=awk
+elif [ "$SYSTEM" = OSF1 ]
+	then AWK=gawk
+elif [ "$SYSTEM" = Linux ]
+	then AWK=gawk
+fi
+export AWK
+
+LANG=C
+export LANG
+
+# Substitute POSIX-compliant shell:
+SH=/bin/sh
+if [ "$SYSTEM" = HP-UX ]
+	then SH=/bin/posix/sh
+elif [ "$SYSTEM" = OSF1 ]
+	then SH=/bin/ksh
+fi
+
+### NO CHANGES EXPECTED BELOW THIS LINE +++++++++++++++++++++++++++++++++++++++
+
+# other settings:
+#CHLOROTMPNAME=res`date '+%y%m%d%H%M%S'`.$$
+CHLOROTMPNAME=res.$$
+CHLOROTMP=tmp/$CHLOROTMPNAME
+SCRIPTS=bin
+SYN=syn
+ETC=etc
+HOW=$CHLOROP/how/how98_$SYSTEM
+HOWLIN=$CHLOROP/how/howlin_$SYSTEM
+TESTHOW="$CHLOROP/how/testhow98 -H $HOW"
+INFORMAT=fasta				# default input format
+FULLOUT=off				# default= no residuewise output
+USAGE='Usage: chlorop [-h] [-v] [-F] [seqfile]'
+VERSION='chlorop v1.1'
+ulimit -c 0
+
+### get the options +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+while expr "//$1" : //- >/dev/null
+do
+        case "$1" in
+	-h ) 			# help wanted
+		echo $USAGE
+        	exit 1
+		;;
+	-v )
+		echo $VERSION	# print version number
+		exit 1
+		;;
+	-H )			# file in HOW format (default is fasta)
+		INFORMAT=how
+		;;
+	-F )			# full output (all 1st layer scores)
+		FULLOUT=on
+	esac
+	shift
+done
+
+### get the infile ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+INFILE=$*
+
+mkdir $CHLOROP/$CHLOROTMP || { echo Cannot create temporary directory; exit 1; }
+
+### prepare input file in HOW and fasta format ++++++++++++++++++++++++++++++++
+$AWK -f $CHLOROP/$SCRIPTS/in2how+fasta.awk -v informat=$INFORMAT \
+	-v howout=$CHLOROP/$CHLOROTMP/infile.how \
+	-v fastaout=$CHLOROP/$CHLOROTMP/infile.fasta $INFILE
+INFILE=$CHLOROTMP/infile.how
+
+### change to working directory +++++++++++++++++++++++++++++++++++++++++++++++
+cd $CHLOROP
+
+### do the job ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ANTAL=`cat $INFILE |  grep -c '^ .[0-9]*'`
+
+### run HOW networks ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+for  p in 1 2 3 4 5
+do
+        $SH $TESTHOW -H $HOW -w $SYN/NEW.2h.w51.lr01.200.syn.$p \
+		$INFILE > $CHLOROTMP/korn.testhow.$$.$p
+done
+
+# Combine 5 HOW network outputs to one
+$PASTE $CHLOROTMP/korn.testhow.$$.? | $AWK -f $SCRIPTS/combine.oe.ctp.awk > \
+	$CHLOROTMP/5to1HOW_scores.$$
+
+# Convert HOW output to HOWLIN input and create file with sequence name and length
+$AWK -f $SCRIPTS/analys2data_A.awk -v w=100 -v name_file=$CHLOROTMP/name_file.$$ \
+	$CHLOROTMP/5to1HOW_scores.$$ > $CHLOROTMP/hl.$$
+
+### run HOWLIN networks +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+HLSYNFILE=$SYN/hl.syn
+HLSEQFILE=$CHLOROTMP/hl.$$
+for nr in 1 2 3 4 5 
+do
+# make 5 howlin.dat-files
+$AWK -f $SCRIPTS/make_howlin_dat.awk -v seqfile=$HLSEQFILE -v synfile=$HLSYNFILE \
+	-v number=$nr -v noofseq=$ANTAL -v l1no=100 -v l2no=10 -v l3no=1 $ETC/howlin.dat \
+	> $CHLOROTMP/howlin.$$.dat.$nr
+
+# do 5 howlin runs
+$HOWLIN < $CHLOROTMP/howlin.$$.dat.$nr 2>/dev/null | tr -d '\0' | \
+	sed 's/ *$//' \
+	>$CHLOROTMP/howlin.res.$$.$nr
+done
+
+# paste 5 howlin output together and calculate average of howlin output
+$PASTE $CHLOROTMP/howlin.res.$$.? | $AWK -f $SCRIPTS/howlin_ave_calc.awk -v noofseq=$ANTAL \
+	> $CHLOROTMP/ave_result.$$
+
+### calculate cleavage site +++++++++++++++++++++++++++++++++++++++++++++++++++
+# Input values
+DVAL=5
+
+# Calculate derivative
+# Create outfile containing: name, aa nr, nn output, "derivata", and NN (HOW) scores.
+for nr in 1 2 3 4 5
+do
+        $AWK -f $SCRIPTS/calc-derivata.awk -v d=$DVAL $CHLOROTMP/5to1HOW_scores.$$ > \
+		$CHLOROTMP/derivata.d$DVAL.$$
+done
+
+# Get 20+20 around the maximum
+# - first make a file where only the header of every deriv-file entry is present
+$AWK '/^#/ { print $0} ' $CHLOROTMP/derivata.d$DVAL.$$ > $CHLOROTMP/short_derivata.d$DVAL.$$
+# - extract the name, highest derivative score and the sequence
+$AWK -f $SCRIPTS/plocka.WcsW.awk -v win_in=20 -v \
+	deriv_file=$CHLOROTMP/short_derivata.d$DVAL.$$ $INFILE > $CHLOROTMP/WcsW.outfile.$$
+
+# Calculate MEME score
+# - calculate score and write (among other things) the predicted cTP length to file
+cat $ETC/matrix.62.w8.20+6 $CHLOROTMP/WcsW.outfile.$$ | $AWK -f \
+	$SCRIPTS/calc_of_motif_score.awk -v win_in=20 \
+	-v csscorefile=$CHLOROTMP/csscorefile.$$ > $CHLOROTMP/cs-pred.$$
+
+### present the results +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+# Prepare cs-result-file for presentation
+$AWK '/^#/ { printf "%7.3f\t   %3d\n", $3,$6 } ' $CHLOROTMP/cs-pred.$$ > \
+	$CHLOROTMP/cs-pred.presented.$$
+
+# Presenting cTP/non-cTP prediction results
+echo
+echo "### "$VERSION" prediction results ###########################"
+echo "Number of query sequences: "$ANTAL 
+echo
+echo "Name                  Length       Score  cTP       CS-    cTP-"
+echo "                                                  score  length"
+echo "---------------------------------------------------------------"
+$PASTE $CHLOROTMP/name_file.$$ $CHLOROTMP/ave_result.$$ $CHLOROTMP/cs-pred.presented.$$ 
+echo "---------------------------------------------------------------"
+echo " "
+if [ $FULLOUT = on ]
+then
+	echo "---Detailed output---------------"
+	echo " "
+	echo "Residue   --NN-score--   CS-score "
+	echo "          Raw   Deriv.            "
+	echo "---------------------------------"
+	$PASTE $CHLOROTMP/derivata.d$DVAL.$$ $CHLOROTMP/csscorefile.$$ | \
+	$AWK '{if ($1=="#") {len=$3; print "Name:  " $2; for (i=1; i<=len; i++) \
+	{getline; printf "%5d %1s   %5.3f %5.3f\t%6.3f\n",$1,$2,$3,$4,$6}; \
+	print " "}}'
+	echo "---End---------------------------"
+fi
+
+### cleanup +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+rm -rf $CHLOROTMP
+
+
+### end of script #############################################################
